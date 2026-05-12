@@ -22,6 +22,7 @@ import type {
   BrowserContext,
   BrowserContextOptions,
   Page,
+  Response,
 } from "playwright";
 import { runAutoconsent } from "./autoconsent.js";
 
@@ -53,6 +54,13 @@ export interface FortifiedGotoResult {
   /** True if `page.goto` resolved without throwing. False if the nav
    *  timed out or errored (page may still be usable for partial extract). */
   navOk: boolean;
+  /**
+   * The Playwright `Response` from `page.goto`. Null when `navOk` is
+   * false, when the navigation didn't produce a response (e.g.
+   * about:blank), or when the same-document navigation hook fired.
+   * Use `response?.ok()` to detect 4xx/5xx without re-fetching.
+   */
+  response: Response | null;
 }
 
 /**
@@ -102,12 +110,14 @@ export async function fortifiedGoto(
   const timeout = opts.timeout ?? 20_000;
 
   let navOk = true;
-  await page.goto(url, { waitUntil, timeout }).catch((err) => {
+  let response: Response | null = null;
+  response = await page.goto(url, { waitUntil, timeout }).catch((err) => {
     console.warn(
       "[brand-extract] nav failed, continuing with partial",
       err instanceof Error ? err.message : err,
     );
     navOk = false;
+    return null;
   });
 
   if (opts.additionalWaitMs && opts.additionalWaitMs > 0) {
@@ -152,5 +162,5 @@ export async function fortifiedGoto(
       .catch(() => {});
   }
 
-  return { navOk };
+  return { navOk, response };
 }
