@@ -18,7 +18,8 @@
     "build": "tsc",
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "prepare": "tsc"
   },
   "dependencies": {
     "@duckduckgo/autoconsent": "^14.79.0",
