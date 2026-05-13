@@ -133,30 +133,60 @@ export async function fortifiedGoto(
     });
     await page.waitForTimeout(500).catch(() => {});
 
-    // Walk-up CSS fallback for CMPs autoconsent has no rule for.
+    // Walk-up fallback for CMPs autoconsent has no rule for. Two passes:
+    //   (1) Walk-up: ascend from any cookie/consent-hinted element to the
+    //       nearest fixed/absolute-positioned ancestor and remove it.
+    //       Catches Shopify-style nested drawers where the named element
+    //       is buried inside an unnamed wrapper.
+    //   (2) Direct: also remove the hinted elements themselves. Catches
+    //       text-cleanup cases — autoconsent's prehide CSS often hides
+    //       elements via display:none, which leaves them in the DOM for
+    //       page.content() / sanitized-text consumers to pick up. .remove()
+    //       at the source ensures both the visual AND the text are clean.
     await page
       .evaluate(() => {
         const HINT =
-          '[id*="cookie" i],[class*="cookie" i],[id*="consent" i],[class*="consent" i],[id*="gdpr" i],[class*="gdpr" i],[aria-label*="cookie" i],[aria-label*="consent" i]';
+          // Direct cookie/consent/GDPR hints
+          '[id*="cookie" i],[class*="cookie" i],' +
+          '[id*="consent" i],[class*="consent" i],' +
+          '[id*="gdpr" i],[class*="gdpr" i],' +
+          '[aria-label*="cookie" i],[aria-label*="consent" i],' +
+          // Common CMPs that don't include "cookie" / "consent" in element naming
+          '[id*="shopify-pc" i],[class*="shopify-pc" i],' + // Shopify Privacy Center
+          '[id*="onetrust" i],[class*="onetrust" i],' + // OneTrust SDK
+          '[id*="cookiebot" i],[class*="cookiebot" i],' + // Cookiebot
+          '[id*="usercentrics" i],[class*="usercentrics" i],' + // Usercentrics
+          '[id*="truste" i],[class*="truste" i]'; // TrustArc
+        const matches = Array.from(document.querySelectorAll(HINT));
+
+        // Pass 1: walk-up + remove visual container.
         const removed = new Set<Element>();
-        document.querySelectorAll(HINT).forEach((el) => {
+        matches.forEach((el) => {
           let cur: Element | null = el;
           for (let i = 0; i < 10 && cur && cur !== document.body; i++) {
             const cs = getComputedStyle(cur);
             if (cs.position === "fixed" || cs.position === "absolute") {
               const r = cur.getBoundingClientRect();
+              // Keep the size guard for visible elements — protects against
+              // false positives like a small "manage cookies" footer link
+              // that happens to live inside a positioned tooltip wrapper.
+              // For autoconsent-hidden elements (zero rect) the guard fails
+              // safely; pass 2 below catches the text instead.
               if (r.width > 80 && r.height > 40 && !removed.has(cur)) {
                 removed.add(cur);
-                (cur as HTMLElement).style.setProperty(
-                  "display",
-                  "none",
-                  "important",
-                );
+                cur.remove();
               }
               break;
             }
             cur = cur.parentElement;
           }
+        });
+
+        // Pass 2: remove the hinted elements themselves (those still attached).
+        // No size guard — these matched our specific cookie/consent/gdpr
+        // selector, so the false-positive risk is low.
+        matches.forEach((el) => {
+          if (el.isConnected) el.remove();
         });
       })
       .catch(() => {});
