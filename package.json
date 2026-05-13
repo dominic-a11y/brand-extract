@@ -1,6 +1,6 @@
 {
   "name": "brand-extract",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "URL → brand tokens + meta + screenshot. Fail-tolerant Playwright + dembrandt scraper.",
   "type": "module",
   "private": true,

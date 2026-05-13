@@ -30,16 +30,24 @@ const DEFAULT_VIEWPORT = { width: 1280, height: 800 };
 
 export interface FortifiedGotoOptions {
   /**
-   * Playwright nav wait strategy. Default `"networkidle"` matches the
-   * extractBrand default. Pass `"domcontentloaded"` for sites that
-   * never go quiet (analytics, chat widgets, infinite-poll SPAs).
+   * Playwright nav wait strategy. Default `"domcontentloaded"` —
+   * `"networkidle"` is too brittle on real sites: heavy SPAs with
+   * analytics / chat widgets / poll-based features rarely go quiet
+   * within any reasonable timeout, so the nav fails over to .catch
+   * fallthrough and we screenshot a half-rendered page anyway.
+   * `"domcontentloaded"` fires sooner + the `additionalWaitMs` default
+   * gives hydration a moment. Pass `"networkidle"` explicitly if you
+   * really need the network to be quiet.
    */
   waitUntil?: "load" | "domcontentloaded" | "networkidle" | "commit";
   /** Nav timeout. Default 20_000 ms. Failures are caught — never thrown. */
   timeout?: number;
   /**
    * Extra wait after navigation completes (or times out), before cookie
-   * dismissal. Lets SPA hydration / lazy content settle. Default 0 ms.
+   * dismissal. Lets SPA hydration / lazy content settle. Default
+   * 1500 ms — empirically enough for most marketing sites to render
+   * above-the-fold content + populate first-paint product imagery.
+   * Set to 0 to skip if you need fastest-possible turnaround.
    */
   additionalWaitMs?: number;
   /**
@@ -106,8 +114,9 @@ export async function fortifiedGoto(
   url: string,
   opts: FortifiedGotoOptions = {},
 ): Promise<FortifiedGotoResult> {
-  const waitUntil = opts.waitUntil ?? "networkidle";
+  const waitUntil = opts.waitUntil ?? "domcontentloaded";
   const timeout = opts.timeout ?? 20_000;
+  const additionalWaitMs = opts.additionalWaitMs ?? 1500;
 
   let navOk = true;
   let response: Response | null = null;
@@ -120,8 +129,8 @@ export async function fortifiedGoto(
     return null;
   });
 
-  if (opts.additionalWaitMs && opts.additionalWaitMs > 0) {
-    await page.waitForTimeout(opts.additionalWaitMs).catch(() => {});
+  if (additionalWaitMs > 0) {
+    await page.waitForTimeout(additionalWaitMs).catch(() => {});
   }
 
   if (!opts.skipCookieHide) {
@@ -156,7 +165,25 @@ export async function fortifiedGoto(
           '[id*="onetrust" i],[class*="onetrust" i],' + // OneTrust SDK
           '[id*="cookiebot" i],[class*="cookiebot" i],' + // Cookiebot
           '[id*="usercentrics" i],[class*="usercentrics" i],' + // Usercentrics
-          '[id*="truste" i],[class*="truste" i]'; // TrustArc
+          '[id*="truste" i],[class*="truste" i],' + // TrustArc
+          // Geo-redirect / "select your country" interstitials. These obscure
+          // the brand surface for the same downstream-LLM reason as cookie
+          // banners (Apple, Nike, Sephora, Gymshark all serve them on first
+          // visit from a foreign IP). Selectors are intentionally specific —
+          // generic "country" / "region" / "locale" would catch nav-bar
+          // locale switchers and currency dropdowns. The walk-up + size
+          // guard provides additional protection against false positives.
+          '[id*="region-select" i],[class*="region-select" i],' +
+          '[id*="region-redirect" i],[class*="region-redirect" i],' +
+          '[id*="region-modal" i],[class*="region-modal" i],' +
+          '[id*="country-select" i],[class*="country-select" i],' +
+          '[id*="country-redirect" i],[class*="country-redirect" i],' +
+          '[id*="country-modal" i],[class*="country-modal" i],' +
+          '[id*="geo-redirect" i],[class*="geo-redirect" i],' +
+          '[id*="geo-modal" i],[class*="geo-modal" i],' +
+          '[id*="geo-popup" i],[class*="geo-popup" i],' +
+          '[id*="locale-redirect" i],[class*="locale-redirect" i],' +
+          '[id*="ship-to" i],[class*="ship-to" i]';
         const matches = Array.from(document.querySelectorAll(HINT));
 
         // Pass 1: walk-up + remove visual container.
@@ -187,6 +214,54 @@ export async function fortifiedGoto(
         // selector, so the false-positive risk is low.
         matches.forEach((el) => {
           if (el.isConnected) el.remove();
+        });
+
+        // Pass 3: content-based geo-redirect dismissal. Sites built on
+        // CSS-in-JS (Emotion, styled-components, etc.) have hash-based
+        // class names that no selector can target — Sephora's geo-modal
+        // is e.g. `<div role="dialog" class="css-425ijq">`. The only
+        // reliable marker is the user-facing copy. Match dialogs/role=
+        // alertdialog elements containing distinctive geo-redirect
+        // phrases, then walk up to the positioned ancestor and remove.
+        const GEO_PHRASES = [
+          "trying to access",
+          "ship to your country",
+          "ship to this country",
+          "doesn't ship to",
+          "does not ship to",
+          "international site",
+          "international websites",
+          "international version",
+          "select your country",
+          "select your region",
+          "select your location",
+          "choose your country",
+          "choose your region",
+          "you're in",
+          "you are in",
+          "another country",
+          "different country",
+        ];
+        const dialogs = document.querySelectorAll<HTMLElement>(
+          '[role="dialog"],[role="alertdialog"]',
+        );
+        dialogs.forEach((dlg) => {
+          const text = (dlg.textContent ?? "").toLowerCase();
+          if (!GEO_PHRASES.some((p) => text.includes(p))) return;
+          // Walk up to the nearest fixed/absolute ancestor (the actual
+          // visible overlay container — dialog itself is often relative
+          // inside a fixed wrapper).
+          let cur: Element | null = dlg;
+          for (let i = 0; i < 6 && cur && cur !== document.body; i++) {
+            const cs = getComputedStyle(cur);
+            if (cs.position === "fixed" || cs.position === "absolute") {
+              cur.remove();
+              return;
+            }
+            cur = cur.parentElement;
+          }
+          // No positioned ancestor found — remove the dialog itself.
+          dlg.remove();
         });
       })
       .catch(() => {});
